@@ -17,6 +17,7 @@
 package dev.morling.onebrc.perf_tests;
 
 import org.openjdk.jmh.annotations.*;
+import org.openjdk.jmh.infra.Blackhole;
 
 import java.io.*;
 import java.nio.MappedByteBuffer;
@@ -24,7 +25,6 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 @State(Scope.Benchmark)
 @Fork(value = 1)
@@ -35,58 +35,53 @@ import java.util.concurrent.atomic.AtomicLong;
 public class FileReadingTests {
 
     @Benchmark
-    public long measureBufferedReader() {
-        AtomicLong count = new AtomicLong(0);
+    public void measureBufferedReader(Blackhole blackhole) {
         String filePath = "./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt";
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(filePath)))) {
-            reader.lines().forEach(line -> count.getAndAdd(line.length()));
-            return count.longValue();
-        }
-        catch (IOException e) {
+            reader.lines().forEach(blackhole::consume);
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
 
     @Benchmark
-    public long measureBufferedReaderCustomBuffer() {
-        AtomicLong count = new AtomicLong(0);
+    public void measureBufferedReaderCustomBuffer(Blackhole blackhole) {
         String filePath = "./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt";
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(filePath)), 8192 * 16)) {
-            reader.lines().forEach(line -> count.getAndAdd(line.length()));
-            return count.longValue();
-        }
-        catch (IOException e) {
+        try (BufferedReader reader = java.nio.file.Files.newBufferedReader(Path.of(filePath))) {
+            reader.lines().forEach(blackhole::consume);
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
 
     @Benchmark
-    public long measureReadLines() {
-        AtomicLong count = new AtomicLong(0);
+    public void measureReadLines(Blackhole blackhole) {
+        ;
         try {
             Files.lines(Path.of("./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt"))
-                    .forEach(line -> count.getAndAdd(line.length()));
-            return count.longValue();
-        }catch (IOException e) {
+                    .forEach(blackhole::consume);
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
 
     @Benchmark
-    public long measureMemoryMappedReader() {
-        AtomicLong count = new AtomicLong(0);
+    public void measureMemoryMappedReader(Blackhole blackhole) {
         try (RandomAccessFile file = new RandomAccessFile("./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt", "r");
-                FileChannel fileChannel = file.getChannel()) {
-            // Mapping a file into memory
+             FileChannel fileChannel = file.getChannel()) {
+
             MappedByteBuffer buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, fileChannel.size());
-            // Reading data from Memory Mapped Buffer
+            StringBuilder builder = new StringBuilder();
             while (buffer.hasRemaining()) {
-                char a = (char) buffer.get();
-                count.getAndIncrement();
+                char c = buffer.getChar();
+                if (c == '\n') {
+                    blackhole.consume(builder.toString());
+                    builder.setLength(0);
+                } else {
+                    builder.append(c);
+                }
             }
-            return count.longValue();
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
