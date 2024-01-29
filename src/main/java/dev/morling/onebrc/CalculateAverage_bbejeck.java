@@ -17,12 +17,20 @@ package dev.morling.onebrc;
 
 import static java.util.stream.Collectors.*;
 
-import java.io.IOException;
+import java.io.*;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collector;
+import java.util.stream.Stream;
 
 public class CalculateAverage_bbejeck {
 
@@ -43,7 +51,7 @@ public class CalculateAverage_bbejeck {
         private double round(double value) {
             return Math.round(value * 10.0) / 10.0;
         }
-    };
+    }
 
     private static class MeasurementAggregator {
         private double min = Double.POSITIVE_INFINITY;
@@ -83,10 +91,54 @@ public class CalculateAverage_bbejeck {
                     return new ResultRow(agg.min, (Math.round(agg.sum * 10.0) / 10.0) / agg.count, agg.max);
                 });
 
-        Map<String, ResultRow> measurements = new TreeMap<>(Files.lines(Paths.get(FILE))
+        Map<String, ResultRow> measurements = new TreeMap<>(Stream.generate(new MappedFileLineSupplier(FILE)).limit(1_000_000_000)
                 .map(l -> new Measurement(l.split(";")))
                 .collect(groupingBy(m -> m.station(), collector)));
 
         System.out.println(measurements);
+    }
+
+    static class MappedFileLineSupplier implements Supplier<String> {
+        private final String file;
+        private static final int LINE_COUNT = 1_000_000_000;
+        private int completedLineCount = 0;
+        LinkedBlockingQueue<String> queue;
+
+        public MappedFileLineSupplier(final String file) {
+            this.file = file;
+            queue = new LinkedBlockingQueue<>();
+            start();
+        }
+
+        private void start() {
+            Thread.ofPlatform().start(() -> {
+                try (BufferedReader reader = new BufferedReader(new FileReader((this.file)), 8 * 1024)) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        completedLineCount += 1;
+                        if (completedLineCount % 100_000_000 == 0) {
+                            System.out.println("Processed 100_000_000 lines");
+                        }
+                        queue.put(line);
+                    }
+                    System.out.println("Quitting processing");
+                }
+                catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
+
+        @Override
+        public String get() {
+            String line = "";
+            try {
+                line = queue.poll(5, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return line;
+        }
     }
 }
