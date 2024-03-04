@@ -39,7 +39,8 @@ public class FileReadingTests {
         String filePath = "./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt";
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(filePath)))) {
             reader.lines().forEach(blackhole::consume);
-        } catch (IOException e) {
+        }
+        catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
@@ -49,7 +50,8 @@ public class FileReadingTests {
         String filePath = "./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt";
         try (BufferedReader reader = java.nio.file.Files.newBufferedReader(Path.of(filePath))) {
             reader.lines().forEach(blackhole::consume);
-        } catch (IOException e) {
+        }
+        catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
@@ -60,7 +62,8 @@ public class FileReadingTests {
         try {
             Files.lines(Path.of("./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt"))
                     .forEach(blackhole::consume);
-        } catch (IOException e) {
+        }
+        catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
@@ -68,7 +71,7 @@ public class FileReadingTests {
     @Benchmark
     public void measureMemoryMappedReader(Blackhole blackhole) {
         try (RandomAccessFile file = new RandomAccessFile("./src/main/java/dev/morling/onebrc/perf_tests/measurements.txt", "r");
-             FileChannel fileChannel = file.getChannel()) {
+                FileChannel fileChannel = file.getChannel()) {
 
             MappedByteBuffer buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, fileChannel.size());
             StringBuilder builder = new StringBuilder();
@@ -77,11 +80,13 @@ public class FileReadingTests {
                 if (c == '\n') {
                     blackhole.consume(builder.toString());
                     builder.setLength(0);
-                } else {
+                }
+                else {
                     builder.append(c);
                 }
             }
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
