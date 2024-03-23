@@ -54,6 +54,9 @@ public class CalculateAverage_bbejeck {
         private long count;
     }
 
+    record MeasurementResult(long lineCount, Map<byte[], MeasurementAggregator> result) {
+    }
+
     public static void main(String[] args) throws IOException {
         // Map<String, Double> measurements1 = Files.lines(Paths.get(FILE))
         // .map(l -> l.split(";"))
@@ -91,7 +94,7 @@ public class CalculateAverage_bbejeck {
         // .collect(groupingBy(m -> m.station(), collector)));
         long end = System.currentTimeMillis() - start;
         System.out.println(measurements);
-        System.out.printf("Took %d seconds", end / 1000);
+        // System.out.printf("Took %d seconds", end / 1000);
     }
 
     static List<Map<byte[], MeasurementAggregator>> getListOfMaps() {
@@ -111,37 +114,25 @@ public class CalculateAverage_bbejeck {
             start = start + 1L;
             long leftOver = total - start;
             buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, leftOver));
-            System.out.printf("File size is %d  segments are %d remainder is %d %n", total, segments, remainder);
-            buffers.forEach(buffer -> System.out.printf("Buffer remaining %d %n", buffer.remaining()));
-            List<Future<Long>> lineProducerFutures = new ArrayList<>();
-            List<Future<Map<byte[], MeasurementAggregator>>> measurementFutures = new ArrayList<>();
+            // System.out.printf("File size is %d segments are %d remainder is %d %n", total, segments, remainder);
+            // buffers.forEach(buffer -> System.out.printf("Buffer remaining %d %n", buffer.remaining()));
+            List<Future<MeasurementResult>> lineProcessingFutures = new ArrayList<>();
             long allStart = System.currentTimeMillis();
             try (ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor()) {
                 buffers.forEach(buffer -> {
-                    BlockingQueue<List<Object[]>> queue = new ArrayBlockingQueue<>(2_000_000);
-                    lineProducerFutures.add(executorService.submit(new MappedSegmentLineProducer(buffer, queue)));
-                    measurementFutures.add(executorService.submit(new MappedSegmentLineConsumer(queue)));
+                    lineProcessingFutures.add(executorService.submit(new MappedSegmentLineProcessor(buffer)));
                 });
-                System.out.println("All tasks started, will start checking for completion");
+                // System.out.println("All tasks started, will start checking for completion");
                 long totalLines = 0L;
                 long totalRecords = 0L;
-                for (Future<Long> future : lineProducerFutures) {
+                mapList = new ArrayList<>(lineProcessingFutures.size());
+                for (Future<MeasurementResult> mapFuture : lineProcessingFutures) {
                     try {
-                        long lines = future.get();
-                        totalLines += lines;
-                        System.out.printf("Producing Future %s  Done with %d lines %n", future, lines);
-                    }
-                    catch (InterruptedException | ExecutionException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-                mapList = new ArrayList<>(measurementFutures.size());
-                for (Future<Map<byte[], MeasurementAggregator>> mapFuture : measurementFutures) {
-                    try {
-                        Map<byte[], MeasurementAggregator> map = mapFuture.get();
+                        MeasurementResult measurementResult = mapFuture.get();
+                        Map<byte[], MeasurementAggregator> map = measurementResult.result();
                         mapList.add(map);
                         totalRecords += map.size();
-                        System.out.printf("Consuming Future %s Done with %d records %n", mapFuture, map.size());
+                        totalLines += measurementResult.lineCount();
                     }
                     catch (InterruptedException | ExecutionException e) {
                         throw new RuntimeException(e);
@@ -149,7 +140,7 @@ public class CalculateAverage_bbejeck {
                 }
 
                 long allEnd = System.currentTimeMillis();
-                System.out.printf("Done processing 13G file, %d lines and %d records in %d seconds %n", totalLines, totalRecords, (allEnd - allStart) / 1000);
+                // System.out.printf("Done processing 13G file, %d lines and %d records in %d seconds %n", totalLines, totalRecords, (allEnd - allStart) / 1000);
                 return mapList;
             }
 
@@ -159,116 +150,94 @@ public class CalculateAverage_bbejeck {
         }
     }
 
-    static class MappedSegmentLineProducer implements Callable<Long> {
+    static class MappedSegmentLineProcessor implements Callable<MeasurementResult> {
         private final MappedByteBuffer mappedByteBuffer;
-        private final BlockingQueue<List<Object[]>> queue;
+        private final int listCapacity = 100;
+        private final List<Object[]> records = new ArrayList<>(listCapacity);
+        private final Map<byte[], MeasurementAggregator> map = new HashMap<>();
+        private ByteBuffer buffer = ByteBuffer.allocate(Double.BYTES * 4);
 
-        public MappedSegmentLineProducer(MappedByteBuffer mappedByteBuffer, BlockingQueue<List<Object[]>> queue) {
+        public MappedSegmentLineProcessor(MappedByteBuffer mappedByteBuffer) {
             this.mappedByteBuffer = mappedByteBuffer;
-            this.queue = queue;
+            for (int i = 0; i < listCapacity; i++) {
+                Object[] reading = new Object[2];
+                byte[] st = new byte[100];
+                byte[] val = new byte[25];
+                reading[0] = st;
+                reading[1] = val;
+                records.add(reading);
+            }
+        }
+
+        private void process(List<Object[]> records, int count) {
+            for (int i = 0; i < count; i++) {
+                byte[] stationBytes = (byte[]) records.get(i)[0];
+                byte[] stationReading = (byte[]) records.get(i)[1];
+                double reading = Double.parseDouble(new String(stationReading, 1, stationReading[0]));
+
+                map.compute(stationBytes, (key, value) -> {
+                    if (value == null) {
+                        value = new MeasurementAggregator();
+                        value.count = 1;
+                        value.min = reading;
+                        value.max = reading;
+                        value.sum = reading;
+                    }
+                    else {
+                        value.count = value.count + 1;
+                        value.min = Math.min(reading, value.min);
+                        value.max = Math.max(reading, value.max);
+                        value.sum = value.sum + reading;
+                    }
+                    return value;
+                });
+            }
         }
 
         @Override
-        public Long call() throws Exception {
-
-            byte[] station = new byte[100];
-            byte[] reading = new byte[25];
-            byte[] collector = new byte[500]; 
+        public MeasurementResult call() throws Exception {
+            byte[] station = null;
+            byte[] reading = null;
+            byte[] collector = new byte[500];
             int listCapacity = 100;
-            List<Object[]> tupleList = new ArrayList<>(listCapacity);
             long lineCount = 0L;
             long start = System.currentTimeMillis();
             int currentIndex = 0;
+            int recordCount = 0;
+            int totalRecordCount = 0;
             int remaining = mappedByteBuffer.remaining();
             while (mappedByteBuffer.hasRemaining()) {
                 byte c = mappedByteBuffer.get();
                 if (c == ';') {
-                    station[0] = (byte) (currentIndex + 1);
+                    station = (byte[]) records.get(recordCount)[0];
+                    station[0] = (byte) (currentIndex);
                     System.arraycopy(collector, 0, station, 1, currentIndex + 1);
                     currentIndex = 0;
                 }
                 else if (c == '\n') {
-                    reading[0] = (byte)(currentIndex + 1);
+                    reading = (byte[]) records.get(recordCount)[1];
+                    reading[0] = (byte) (currentIndex);
                     System.arraycopy(collector, 0, reading, 1, currentIndex + 1);
-                    Object[] tuple = new Object[2];
-                    tuple[0] = station;
-                    tuple[1] = reading;
-                    tupleList.add(tuple);
                     currentIndex = 0;
                     lineCount += 1;
-                    if (tupleList.size() == listCapacity) {
-                        queue.put(tupleList);
-                        tupleList = new ArrayList<>(listCapacity);
+                    recordCount += 1;
+                    if (recordCount == listCapacity) {
+                        totalRecordCount += recordCount;
+                        recordCount = 0;
+                        process(records, recordCount);
+                        buffer.clear();
                     }
                 }
                 else {
                     collector[currentIndex++] = c;
                 }
             }
+            process(records, recordCount);
+
             long end = System.currentTimeMillis() - start;
-            System.out.printf("Done processing %s lines in %d seconds %n", lineCount, end / 1000);
-            return lineCount;
-        }
-    }
-
-    static class MappedSegmentLineConsumer implements Callable<Map<byte[], MeasurementAggregator>> {
-
-        private final BlockingQueue<List<Object[]>> queue;
-        private final Map<byte[], MeasurementAggregator> map = new HashMap<>();
-        private final Set<byte[]> byteSet = new HashSet<>();
-
-        public MappedSegmentLineConsumer(BlockingQueue<List<Object[]>> queue) {
-            this.queue = queue;
-        }
-
-        private static final byte[] EMPTY_STATION = new byte[100];
-        private static final byte[] EMPTY_READING = new byte[25];
-        private ByteBuffer buffer = ByteBuffer.allocate(Double.BYTES * 25);
-
-        @Override
-        public Map<byte[], MeasurementAggregator> call() throws Exception {
-            try {
-                List<Object[]> tupleList;
-                int numConsumed = 0;
-                long start = System.currentTimeMillis();
-                while ((tupleList = queue.poll(1, TimeUnit.SECONDS)) != null) {
-                    for (Object[] tuple : tupleList) {
-                        if (!Arrays.equals((byte[]) tuple[0], EMPTY_STATION) &&
-                                !Arrays.equals((byte[]) tuple[1], EMPTY_READING)) {
-                            numConsumed +=1;
-                            byte[] stationReading = (byte[])tuple[1];
-                            buffer.put(stationReading, 1, stationReading[0]);
-                            buffer.rewind();
-                            double reading = buffer.getDouble();
-                            buffer.clear();
-                            byteSet.add((byte[]) tuple[0]);
-                            map.compute((byte[]) tuple[0], (key, value) -> {
-                                if (value == null) {
-                                    value = new MeasurementAggregator();
-                                    value.count = 1;
-                                    value.min = reading;
-                                    value.max = reading;
-                                    value.sum = reading;
-                                }
-                                else {
-                                    value.count = value.count + 1;
-                                    value.min = Math.min(reading, value.min);
-                                    value.max = Math.max(reading, value.max);
-                                    value.sum = value.sum + reading;
-                                }
-                                return value;
-                            });
-                        }
-                    }
-                }
-                long end = System.currentTimeMillis();
-                System.out.printf("Done consuming %d records in %d seconds%n", numConsumed, (end - start) / 1000);
-                System.out.printf("Keys are %s %n", byteSet);
-                return map;
-            }
-            catch (Exception e) {
-                throw new RuntimeException(e);
-            }
+            // System.out.printf("Done processing %s lines in %d seconds %n", lineCount, end / 1000);
+            // System.out.printf("Done processing %s records in %d seconds %n", totalRecordCount, end / 1000);
+            return new MeasurementResult(lineCount, map);
         }
     }
 
