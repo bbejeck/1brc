@@ -64,7 +64,7 @@ public class CalculateAverage_bbejeck {
         // .collect(toMap(e -> e.getKey(), e -> Math.round(e.getValue() * 10.0) / 10.0)));
         // System.out.println(measurements1);
 
-        Function<Map.Entry<byte[], MeasurementAggregator>, String> bytesToString = entry -> new String(entry.getKey(), StandardCharsets.UTF_8);
+        Function<Map.Entry<byte[], MeasurementAggregator>, String> bytesToString = entry -> new String(entry.getKey(), 1, entry.getKey()[0], StandardCharsets.UTF_8);
         Function<Map.Entry<byte[], MeasurementAggregator>, MeasurementAggregator> aggregator = Map.Entry::getValue;
         long start = System.currentTimeMillis();
         Map<String, MeasurementAggregator> mergedMaps = getListOfMaps().stream()
@@ -84,7 +84,7 @@ public class CalculateAverage_bbejeck {
                 .collect(
                         Collectors.toMap(Map.Entry::getKey, (entry) -> {
                             MeasurementAggregator agg = entry.getValue();
-                            ;
+
                             return new ResultRow(agg.min, (Math.round(agg.sum * 10.0) / 10.0) / agg.count, agg.max);
                         })));
         // .map(l -> new Measurement(l.split(";")))
@@ -183,11 +183,13 @@ public class CalculateAverage_bbejeck {
             while (mappedByteBuffer.hasRemaining()) {
                 byte c = mappedByteBuffer.get();
                 if (c == ';') {
-                    System.arraycopy(collector, 0, station, 0, currentIndex + 1);
+                    station[0] = (byte) (currentIndex + 1);
+                    System.arraycopy(collector, 0, station, 1, currentIndex + 1);
                     currentIndex = 0;
                 }
                 else if (c == '\n') {
-                    System.arraycopy(collector, 0, reading, 0, currentIndex + 1);
+                    reading[0] = (byte)(currentIndex + 1);
+                    System.arraycopy(collector, 0, reading, 1, currentIndex + 1);
                     Object[] tuple = new Object[2];
                     tuple[0] = station;
                     tuple[1] = reading;
@@ -213,6 +215,7 @@ public class CalculateAverage_bbejeck {
 
         private final BlockingQueue<List<Object[]>> queue;
         private final Map<byte[], MeasurementAggregator> map = new HashMap<>();
+        private final Set<byte[]> byteSet = new HashSet<>();
 
         public MappedSegmentLineConsumer(BlockingQueue<List<Object[]>> queue) {
             this.queue = queue;
@@ -220,21 +223,25 @@ public class CalculateAverage_bbejeck {
 
         private static final byte[] EMPTY_STATION = new byte[100];
         private static final byte[] EMPTY_READING = new byte[25];
-        private ByteBuffer buffer = ByteBuffer.allocate(Double.BYTES * 15);
+        private ByteBuffer buffer = ByteBuffer.allocate(Double.BYTES * 25);
 
         @Override
         public Map<byte[], MeasurementAggregator> call() throws Exception {
             try {
                 List<Object[]> tupleList;
+                int numConsumed = 0;
                 long start = System.currentTimeMillis();
                 while ((tupleList = queue.poll(1, TimeUnit.SECONDS)) != null) {
                     for (Object[] tuple : tupleList) {
                         if (!Arrays.equals((byte[]) tuple[0], EMPTY_STATION) &&
                                 !Arrays.equals((byte[]) tuple[1], EMPTY_READING)) {
-                            buffer.put((byte[]) tuple[1]);
+                            numConsumed +=1;
+                            byte[] stationReading = (byte[])tuple[1];
+                            buffer.put(stationReading, 1, stationReading[0]);
                             buffer.rewind();
                             double reading = buffer.getDouble();
                             buffer.clear();
+                            byteSet.add((byte[]) tuple[0]);
                             map.compute((byte[]) tuple[0], (key, value) -> {
                                 if (value == null) {
                                     value = new MeasurementAggregator();
@@ -255,7 +262,8 @@ public class CalculateAverage_bbejeck {
                     }
                 }
                 long end = System.currentTimeMillis();
-                System.out.printf("Done consuming %d records in %d seconds%n", map.size(), (end - start) / 1000);
+                System.out.printf("Done consuming %d records in %d seconds%n", numConsumed, (end - start) / 1000);
+                System.out.printf("Keys are %s %n", byteSet);
                 return map;
             }
             catch (Exception e) {
