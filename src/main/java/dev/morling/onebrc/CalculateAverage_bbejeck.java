@@ -140,7 +140,7 @@ public class CalculateAverage_bbejeck {
                 }
 
                 long allEnd = System.currentTimeMillis();
-                // System.out.printf("Done processing 13G file, %d lines and %d records in %d seconds %n", totalLines, totalRecords, (allEnd - allStart) / 1000);
+                System.out.printf("Done processing 13G file, %d lines and %d records in %d seconds %n", totalLines, totalRecords, (allEnd - allStart) / 1000);
                 return mapList;
             }
 
@@ -235,8 +235,8 @@ public class CalculateAverage_bbejeck {
             process(records, recordCount);
 
             long end = System.currentTimeMillis() - start;
-            // System.out.printf("Done processing %s lines in %d seconds %n", lineCount, end / 1000);
-            // System.out.printf("Done processing %s records in %d seconds %n", totalRecordCount, end / 1000);
+            System.out.printf("Done processing %s lines in %d seconds %n", lineCount, end / 1000);
+            System.out.printf("Done processing %s records in %d seconds %n", totalRecordCount, end / 1000);
             return new MeasurementResult(lineCount, map);
         }
     }
