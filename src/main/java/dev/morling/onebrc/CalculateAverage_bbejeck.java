@@ -17,10 +17,8 @@ package dev.morling.onebrc;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
@@ -54,7 +52,7 @@ public class CalculateAverage_bbejeck {
         private long count;
     }
 
-    record MeasurementResult(long lineCount, Map<byte[], MeasurementAggregator> result) {
+    record MeasurementResult(long lineCount, Map<String, MeasurementAggregator> result) {
     }
 
     public static void main(String[] args) throws IOException {
@@ -67,12 +65,12 @@ public class CalculateAverage_bbejeck {
         // .collect(toMap(e -> e.getKey(), e -> Math.round(e.getValue() * 10.0) / 10.0)));
         // System.out.println(measurements1);
 
-        Function<Map.Entry<byte[], MeasurementAggregator>, String> bytesToString = entry -> new String(entry.getKey(), 1, entry.getKey()[0], StandardCharsets.UTF_8);
-        Function<Map.Entry<byte[], MeasurementAggregator>, MeasurementAggregator> aggregator = Map.Entry::getValue;
+        Function<Map.Entry<String, MeasurementAggregator>, String> toKey = Map.Entry::getKey;
+        Function<Map.Entry<String, MeasurementAggregator>, MeasurementAggregator> aggregator = Map.Entry::getValue;
         long start = System.currentTimeMillis();
         Map<String, MeasurementAggregator> mergedMaps = getListOfMaps().stream()
                 .flatMap(map -> map.entrySet().stream())
-                .collect(Collectors.toMap(bytesToString, aggregator, (agg1, agg2) -> {
+                .collect(Collectors.toMap(toKey, aggregator, (agg1, agg2) -> {
                     var res = new MeasurementAggregator();
                     res.min = Math.min(agg1.min, agg2.min);
                     res.max = Math.max(agg1.max, agg2.max);
@@ -97,8 +95,8 @@ public class CalculateAverage_bbejeck {
         // System.out.printf("Took %d seconds", end / 1000);
     }
 
-    static List<Map<byte[], MeasurementAggregator>> getListOfMaps() {
-        List<Map<byte[], MeasurementAggregator>> mapList;
+    static List<Map<String, MeasurementAggregator>> getListOfMaps() {
+        List<Map<String, MeasurementAggregator>> mapList;
         try (RandomAccessFile file = new RandomAccessFile(FILE, "r");
                 FileChannel fileChannel = file.getChannel()) {
             long total = fileChannel.size();
@@ -106,14 +104,19 @@ public class CalculateAverage_bbejeck {
             long remainder = total % Integer.MAX_VALUE;
             List<MappedByteBuffer> buffers = new ArrayList<>();
             long end = Integer.MAX_VALUE;
-            long start = 0;
-            for (int i = 0; i < segments; i++) {
-                buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, end));
-                start = start + Integer.MAX_VALUE + 1L;
+            if (segments == 0) {
+                buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, total));
             }
-            start = start + 1L;
-            long leftOver = total - start;
-            buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, leftOver));
+            else {
+                long start = 0;
+                for (int i = 0; i < segments; i++) {
+                    buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, end));
+                    start = start + Integer.MAX_VALUE + 1L;
+                }
+                start = start + 1L;
+                long leftOver = total - start;
+                buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, leftOver));
+            }
             // System.out.printf("File size is %d segments are %d remainder is %d %n", total, segments, remainder);
             // buffers.forEach(buffer -> System.out.printf("Buffer remaining %d %n", buffer.remaining()));
             List<Future<MeasurementResult>> lineProcessingFutures = new ArrayList<>();
@@ -129,7 +132,7 @@ public class CalculateAverage_bbejeck {
                 for (Future<MeasurementResult> mapFuture : lineProcessingFutures) {
                     try {
                         MeasurementResult measurementResult = mapFuture.get();
-                        Map<byte[], MeasurementAggregator> map = measurementResult.result();
+                        Map<String, MeasurementAggregator> map = measurementResult.result();
                         mapList.add(map);
                         totalRecords += map.size();
                         totalLines += measurementResult.lineCount();
@@ -154,14 +157,13 @@ public class CalculateAverage_bbejeck {
         private final MappedByteBuffer mappedByteBuffer;
         private final int listCapacity = 100;
         private final List<Object[]> records = new ArrayList<>(listCapacity);
-        private final Map<byte[], MeasurementAggregator> map = new HashMap<>();
-        private ByteBuffer buffer = ByteBuffer.allocate(Double.BYTES * 4);
+        private final Map<String, MeasurementAggregator> map = new HashMap<>();
 
         public MappedSegmentLineProcessor(MappedByteBuffer mappedByteBuffer) {
             this.mappedByteBuffer = mappedByteBuffer;
             for (int i = 0; i < listCapacity; i++) {
                 Object[] reading = new Object[2];
-                byte[] st = new byte[100];
+                byte[] st = new byte[200];
                 byte[] val = new byte[25];
                 reading[0] = st;
                 reading[1] = val;
@@ -172,10 +174,11 @@ public class CalculateAverage_bbejeck {
         private void process(List<Object[]> records, int count) {
             for (int i = 0; i < count; i++) {
                 byte[] stationBytes = (byte[]) records.get(i)[0];
+                String stationKey = new String(stationBytes, 1, stationBytes[0]);
                 byte[] stationReading = (byte[]) records.get(i)[1];
                 double reading = Double.parseDouble(new String(stationReading, 1, stationReading[0]));
 
-                map.compute(stationBytes, (key, value) -> {
+                map.compute(stationKey, (key, value) -> {
                     if (value == null) {
                         value = new MeasurementAggregator();
                         value.count = 1;
@@ -196,10 +199,7 @@ public class CalculateAverage_bbejeck {
 
         @Override
         public MeasurementResult call() throws Exception {
-            byte[] station = null;
-            byte[] reading = null;
             byte[] collector = new byte[500];
-            int listCapacity = 100;
             long lineCount = 0L;
             long start = System.currentTimeMillis();
             int currentIndex = 0;
@@ -209,13 +209,13 @@ public class CalculateAverage_bbejeck {
             while (mappedByteBuffer.hasRemaining()) {
                 byte c = mappedByteBuffer.get();
                 if (c == ';') {
-                    station = (byte[]) records.get(recordCount)[0];
+                    byte[] station = (byte[]) records.get(recordCount)[0];
                     station[0] = (byte) (currentIndex);
                     System.arraycopy(collector, 0, station, 1, currentIndex + 1);
                     currentIndex = 0;
                 }
                 else if (c == '\n') {
-                    reading = (byte[]) records.get(recordCount)[1];
+                    byte[] reading = (byte[]) records.get(recordCount)[1];
                     reading[0] = (byte) (currentIndex);
                     System.arraycopy(collector, 0, reading, 1, currentIndex + 1);
                     currentIndex = 0;
@@ -223,9 +223,8 @@ public class CalculateAverage_bbejeck {
                     recordCount += 1;
                     if (recordCount == listCapacity) {
                         totalRecordCount += recordCount;
-                        recordCount = 0;
                         process(records, recordCount);
-                        buffer.clear();
+                        recordCount = 0;
                     }
                 }
                 else {
