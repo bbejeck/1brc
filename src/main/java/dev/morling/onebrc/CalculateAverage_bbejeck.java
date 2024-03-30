@@ -17,6 +17,7 @@ package dev.morling.onebrc;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.*;
@@ -56,18 +57,9 @@ public class CalculateAverage_bbejeck {
     }
 
     public static void main(String[] args) throws IOException {
-        // Map<String, Double> measurements1 = Files.lines(Paths.get(FILE))
-        // .map(l -> l.split(";"))
-        // .collect(groupingBy(m -> m[0], averagingDouble(m -> Double.parseDouble(m[1]))));
-        //
-        // measurements1 = new TreeMap<>(measurements1.entrySet()
-        // .stream()
-        // .collect(toMap(e -> e.getKey(), e -> Math.round(e.getValue() * 10.0) / 10.0)));
-        // System.out.println(measurements1);
 
         Function<Map.Entry<String, MeasurementAggregator>, String> toKey = Map.Entry::getKey;
         Function<Map.Entry<String, MeasurementAggregator>, MeasurementAggregator> aggregator = Map.Entry::getValue;
-        long start = System.currentTimeMillis();
         Map<String, MeasurementAggregator> mergedMaps = getListOfMaps().stream()
                 .flatMap(map -> map.entrySet().stream())
                 .collect(Collectors.toMap(toKey, aggregator, (agg1, agg2) -> {
@@ -88,11 +80,8 @@ public class CalculateAverage_bbejeck {
 
                             return new ResultRow(agg.min, (Math.round(agg.sum * 10.0) / 10.0) / agg.count, agg.max);
                         })));
-        // .map(l -> new Measurement(l.split(";")))
-        // .collect(groupingBy(m -> m.station(), collector)));
-        long end = System.currentTimeMillis() - start;
+
         System.out.println(measurements);
-        // System.out.printf("Took %d seconds", end / 1000);
     }
 
     static List<Map<String, MeasurementAggregator>> getListOfMaps() {
@@ -101,7 +90,6 @@ public class CalculateAverage_bbejeck {
                 FileChannel fileChannel = file.getChannel()) {
             long total = fileChannel.size();
             long segments = total / Integer.MAX_VALUE;
-            long remainder = total % Integer.MAX_VALUE;
             List<MappedByteBuffer> buffers = new ArrayList<>();
             long end = Integer.MAX_VALUE;
             if (segments == 0) {
@@ -110,40 +98,36 @@ public class CalculateAverage_bbejeck {
             else {
                 long start = 0;
                 for (int i = 0; i < segments; i++) {
-                    buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, end));
-                    start = start + Integer.MAX_VALUE + 1L;
+                    MappedByteBuffer buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, start, end);
+                    int untilNewLineEndCounter = 0;
+                    byte c = buffer.get((int) end - 1);
+                    while (c != '\n') {
+                        c = buffer.get((int) end - (++untilNewLineEndCounter));
+                    }
+                    buffer.limit((int) end - untilNewLineEndCounter);
+                    buffers.add(buffer);
+                    start = (start + Integer.MAX_VALUE + 1L) - untilNewLineEndCounter;
                 }
                 start = start + 1L;
                 long leftOver = total - start;
                 buffers.add(fileChannel.map(FileChannel.MapMode.READ_ONLY, start, leftOver));
             }
-            // System.out.printf("File size is %d segments are %d remainder is %d %n", total, segments, remainder);
-            // buffers.forEach(buffer -> System.out.printf("Buffer remaining %d %n", buffer.remaining()));
             List<Future<MeasurementResult>> lineProcessingFutures = new ArrayList<>();
-            long allStart = System.currentTimeMillis();
             try (ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor()) {
                 buffers.forEach(buffer -> {
                     lineProcessingFutures.add(executorService.submit(new MappedSegmentLineProcessor(buffer)));
                 });
-                // System.out.println("All tasks started, will start checking for completion");
-                long totalLines = 0L;
-                long totalRecords = 0L;
                 mapList = new ArrayList<>(lineProcessingFutures.size());
                 for (Future<MeasurementResult> mapFuture : lineProcessingFutures) {
                     try {
                         MeasurementResult measurementResult = mapFuture.get();
                         Map<String, MeasurementAggregator> map = measurementResult.result();
                         mapList.add(map);
-                        totalRecords += map.size();
-                        totalLines += measurementResult.lineCount();
                     }
                     catch (InterruptedException | ExecutionException e) {
                         throw new RuntimeException(e);
                     }
                 }
-
-                long allEnd = System.currentTimeMillis();
-                // System.out.printf("Done processing 13G file, %d lines and %d records in %d seconds %n", totalLines, totalRecords, (allEnd - allStart) / 1000);
                 return mapList;
             }
 
@@ -155,89 +139,88 @@ public class CalculateAverage_bbejeck {
 
     static class MappedSegmentLineProcessor implements Callable<MeasurementResult> {
         private final MappedByteBuffer mappedByteBuffer;
-        private final int listCapacity = 100;
-        private final List<Object[]> records = new ArrayList<>(listCapacity);
         private final Map<String, MeasurementAggregator> map = new HashMap<>();
 
         public MappedSegmentLineProcessor(MappedByteBuffer mappedByteBuffer) {
             this.mappedByteBuffer = mappedByteBuffer;
-            for (int i = 0; i < listCapacity; i++) {
-                Object[] reading = new Object[2];
-                byte[] st = new byte[200];
-                byte[] val = new byte[25];
-                reading[0] = st;
-                reading[1] = val;
-                records.add(reading);
-            }
         }
 
-        private void process(List<Object[]> records, int count) {
-            for (int i = 0; i < count; i++) {
-                byte[] stationBytes = (byte[]) records.get(i)[0];
-                String stationKey = new String(stationBytes, 1, stationBytes[0]);
-                byte[] stationReading = (byte[]) records.get(i)[1];
-                double reading = Double.parseDouble(new String(stationReading, 1, stationReading[0]));
+        private void process(byte[] collector, int stationEnd, int readingEnd) {
 
-                map.compute(stationKey, (key, value) -> {
-                    if (value == null) {
-                        value = new MeasurementAggregator();
-                        value.count = 1;
-                        value.min = reading;
-                        value.max = reading;
-                        value.sum = reading;
-                    }
-                    else {
-                        value.count = value.count + 1;
-                        value.min = Math.min(reading, value.min);
-                        value.max = Math.max(reading, value.max);
-                        value.sum = value.sum + reading;
-                    }
-                    return value;
-                });
+            String stationKey = new String(collector, 0, stationEnd);
+            double reading = getDouble(collector, stationEnd, readingEnd);
+
+            map.compute(stationKey, (key, value) -> {
+                if (value == null) {
+                    value = new MeasurementAggregator();
+                    value.count = 1;
+                    value.min = reading;
+                    value.max = reading;
+                    value.sum = reading;
+                }
+                else {
+                    value.count = value.count + 1;
+                    value.min = Math.min(reading, value.min);
+                    value.max = Math.max(reading, value.max);
+                    value.sum = value.sum + reading;
+                }
+                return value;
+            });
+        }
+
+        private double getDouble(byte[] bytes, int start, int end) {
+            double doubleValue = 0.0;
+            int multiplier = 1;
+            double dividend = 10.0;
+            int signer = 1;
+            boolean foundDot = false;
+            for (int i = start; i < end; i++) {
+                char c = (char) bytes[i];
+                if (c == '-') {
+                    signer *= -1;
+                    continue;
+                }
+                if (c == '.') {
+                    foundDot = true;
+                    continue;
+                }
+                if (foundDot) {
+                    doubleValue += (c - '0') / dividend;
+                    dividend *= 10;
+                }
+                else {
+                    doubleValue *= multiplier;
+                    doubleValue += c - '0';
+                    multiplier = (multiplier << 3) + (multiplier << 1);
+                }
             }
+            doubleValue *= signer;
+            return doubleValue;
         }
 
         @Override
         public MeasurementResult call() throws Exception {
             byte[] collector = new byte[500];
             long lineCount = 0L;
-            long start = System.currentTimeMillis();
             int currentIndex = 0;
-            int recordCount = 0;
-            int totalRecordCount = 0;
-            int remaining = mappedByteBuffer.remaining();
+            int stationEnd = 0;
+            int readingEnd = 0;
             while (mappedByteBuffer.hasRemaining()) {
                 byte c = mappedByteBuffer.get();
                 if (c == ';') {
-                    byte[] station = (byte[]) records.get(recordCount)[0];
-                    station[0] = (byte) (currentIndex);
-                    System.arraycopy(collector, 0, station, 1, currentIndex + 1);
-                    currentIndex = 0;
+                    stationEnd = currentIndex;
                 }
                 else if (c == '\n') {
-                    byte[] reading = (byte[]) records.get(recordCount)[1];
-                    reading[0] = (byte) (currentIndex);
-                    System.arraycopy(collector, 0, reading, 1, currentIndex + 1);
+                    readingEnd = currentIndex;
                     currentIndex = 0;
                     lineCount += 1;
-                    recordCount += 1;
-                    if (recordCount == listCapacity) {
-                        totalRecordCount += recordCount;
-                        process(records, recordCount);
-                        recordCount = 0;
-                    }
+                    process(collector, stationEnd, readingEnd);
                 }
                 else {
                     collector[currentIndex++] = c;
                 }
             }
-            process(records, recordCount);
-
-            long end = System.currentTimeMillis() - start;
-            // System.out.printf("Done processing %s lines in %d seconds %n", lineCount, end / 1000);
-            // System.out.printf("Done processing %s records in %d seconds %n", totalRecordCount, end / 1000);
             return new MeasurementResult(lineCount, map);
         }
     }
-
 }
