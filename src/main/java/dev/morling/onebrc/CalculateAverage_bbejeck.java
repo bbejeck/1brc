@@ -17,7 +17,6 @@ package dev.morling.onebrc;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.*;
@@ -77,7 +76,6 @@ public class CalculateAverage_bbejeck {
                 .collect(
                         Collectors.toMap(Map.Entry::getKey, (entry) -> {
                             MeasurementAggregator agg = entry.getValue();
-
                             return new ResultRow(agg.min, (Math.round(agg.sum * 10.0) / 10.0) / agg.count, agg.max);
                         })));
 
